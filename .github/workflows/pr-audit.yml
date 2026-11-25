@@ -1,0 +1,104 @@
+name: PR Audit
+
+on:
+  pull_request:
+    types:
+      - opened
+      - edited
+      - synchronize
+      - reopened
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-audit-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  conventional-title:
+    name: Validate Conventional Commit PR Title
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - name: Validate PR title against Conventional Commits
+        uses: amannn/action-semantic-pull-request@66e72920af32222769c386d81f89656ebcb6d6d5 # v6.1.4
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            docs
+            refactor
+            perf
+            test
+            chore
+            security
+          requireScope: false
+
+  path-labels:
+    name: Apply Path-Based PR Labels
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Compute and add labels from changed paths
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pullNumber = context.payload.pull_request.number;
+
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner,
+              repo,
+              pull_number: pullNumber,
+              per_page: 100,
+            });
+
+            // Include both current filename and previous_filename so renamed and deleted files match accurately.
+            const touchedPaths = new Set();
+            for (const file of files) {
+              if (file.filename) touchedPaths.add(file.filename);
+              if (file.previous_filename) touchedPaths.add(file.previous_filename);
+            }
+
+            const rules = [
+              { prefix: 'docs/', label: 'documentation' },
+              { prefix: 'backend/', label: 'backend' },
+              { prefix: 'frontend/', label: 'frontend' },
+              { prefix: 'backend/app/modules/rag/', label: 'rag' },
+              { prefix: 'backend/app/modules/ai/', label: 'ai' },
+              { prefix: 'backend/app/mcp/', label: 'mcp' },
+              { prefix: 'infrastructure/', label: 'infrastructure' },
+              { prefix: '.github/', label: 'ci/cd' },
+              { prefix: 'tests/', label: 'tests' },
+            ];
+
+            const labelsToAdd = new Set();
+            for (const filePath of touchedPaths) {
+              for (const rule of rules) {
+                if (filePath.startsWith(rule.prefix)) {
+                  labelsToAdd.add(rule.label);
+                }
+              }
+            }
+
+            if (labelsToAdd.size === 0) {
+              core.info('No path-based labels matched changed files.');
+              return;
+            }
+
+            const targetLabels = Array.from(labelsToAdd);
+            core.info(`Adding labels (preserving existing manual labels): ${targetLabels.join(', ')}`);
+
+            // addLabels appends only and never removes manually applied labels.
+            await github.rest.issues.addLabels({
+              owner,
+              repo,
+              issue_number: pullNumber,
+              labels: targetLabels,
+            });
